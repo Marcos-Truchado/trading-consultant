@@ -12,12 +12,12 @@ from risk_manager import RiskManager
 from chart_engine_v4 import ChartEngineV4
 import pandas as pd
 
-st.set_page_config(page_title="Elliott v4 Cockpit", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="Elliott v4 Cockpit", layout="wide")
 
 st.markdown("**No es un bot. Es tu copiloto: metes un ticker y te dice si comprar/vender/HOLD con score 0-100, confluencias y riesgo calculado.**")
 
 with st.sidebar:
-    st.header("⚙️ Configuración")
+    st.header("Configuración")
     ticker = st.text_input("Ticker (ej: AAPL, NVDA, MSFT, TSLA, WYFI)", value="AAPL").upper()
     period = st.selectbox("Periodo base (Diario)", ["1y", "2y", "5y", "max"], index=1)
     deviation = st.slider("Sensibilidad ZigZag %", 2.0, 25.0, 5.0, 0.5)
@@ -27,7 +27,7 @@ with st.sidebar:
     show_vp = st.checkbox("Mostrar Volume Profile POC", value=True)
     st.markdown("---")
     st.caption("v4 Novedades:\n- Regime Filter (ADX/Chop)\n- SMC BOS/CHOCH/FVG/OB\n- Volume Profile POC/VA\n- RSI Divergence\n- MTF 1W/1D/4H/1H\n- Score 0-100\n- Risk Engine")
-    run_btn = st.button("🚀 Analizar ticker", type="primary", use_container_width=True)
+    run_btn = st.button("Analizar ticker", type="primary", use_container_width=True)
 
 if run_btn:
     with st.spinner(f"Analizando {ticker} en 6 motores..."):
@@ -130,9 +130,9 @@ if run_btn:
                         c4.metric("TP2", f"${risk['tps'][1]['price']:.2f}", f"RR {risk['rr2']:.2f}" if risk['rr2'] else "")
                 st.divider()
                 if not risk['valid_rr']:
-                    st.warning(f"⚠️ RR {risk['rr1']:.2f if risk['rr1'] else 0} bajo (<1.2). Aunque el score sea bueno, el trade no compensa riesgo. Busca entrada más cercana a invalidación.")
+                    st.warning(f"RR {risk['rr1']:.2f if risk['rr1'] else 0} bajo (<1.2). Aunque el score sea bueno, el trade no compensa riesgo. Busca entrada más cercana a invalidación.")
                 else:
-                    st.success(f"✅ RR válido {risk['rr1']:.2f} | Riesgo {risk['risk_pct']:.1f}% del precio al stop")
+                    st.success(f"RR válido {risk['rr1']:.2f} | Riesgo {risk['risk_pct']:.1f}% del precio al stop")
 
                 st.markdown("**Fibs ancladas a tramo ACTIVO (fix v4):**")
                 col_f1, col_f2 = st.columns(2)

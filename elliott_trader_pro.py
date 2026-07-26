@@ -263,6 +263,37 @@ class ActiveWaveClassifier:
     Resuelve el bug de anclar proyecciones a estructuras viejas.
     """
     
+    def _find_correction_extreme(self, pivots: List[Tuple[int,float,str]], p1_pos: int):
+        """
+        A partir de la posición de p1 (fin de la onda de impulso), recorre los
+        pivotes siguientes del lado contrario y devuelve el más extremo de todos.
+
+        Esto es lo que faltaba: antes se asumía que la onda 2/4 era un único
+        pivote en V (p2 = pivots[-1], sin más). Si la corrección es compleja
+        (W-X-Y, varias piernas, como en tu ejemplo de ONDS), ese primer rebote
+        es X, no el fin real de la corrección (Y) -- y todo lo que se ancla a
+        ese punto (Fibonacci, target de onda 3) sale mal.
+
+        Si en el camino aparece un pivote del MISMO lado que p1 que rompe ese
+        nivel, la onda de impulso original queda invalidada (ya no hay techo/
+        suelo válido de onda 1) y se descarta la hipótesis.
+        """
+        p1 = pivots[p1_pos]
+        correction_side = 'L' if p1[2] == 'H' else 'H'
+        same_side = p1[2]
+        extreme = None
+        correction_pivots = []
+        for p in pivots[p1_pos+1:]:
+            if p[2] == correction_side:
+                correction_pivots.append(p)
+                if extreme is None or (p[1] < extreme[1] if correction_side == 'L' else p[1] > extreme[1]):
+                    extreme = p
+            else:
+                invalidated = (p[1] > p1[1]) if same_side == 'H' else (p[1] < p1[1])
+                if invalidated:
+                    return None, []
+        return extreme, correction_pivots
+
     def classify(self, pivots: List[Tuple[int,float,str]], current_price: float, current_idx: int) -> Dict:
         if len(pivots) < 2:
             return self._unknown("Pocos pivotes")
@@ -275,39 +306,72 @@ class ActiveWaveClassifier:
         def is_alternating(seq):
             return all(seq[i][2] != seq[i+1][2] for i in range(len(seq)-1))
 
-        # ---- HIPÓTESIS 1: FORMANDO ONDA 3 (tenemos 1-2 confirmados) ----
-        if len(pivots) >= 3:
-            p0,p1,p2 = pivots[-3], pivots[-2], pivots[-1]
-            if is_alternating([p0,p1,p2]):
-                is_bull = p0[2]=='L' and p1[2]=='H' and p2[2]=='L'
-                is_bear = p0[2]=='H' and p1[2]=='L' and p2[2]=='H'
-                if is_bull or is_bear:
-                    w1 = abs(p1[1]-p0[1])
-                    w2 = abs(p1[1]-p2[1])
-                    ratio = w2/w1 if w1!=0 else 0
-                    # Onda 2 típica 50-61.8% de onda 1
-                    if 0.35 <= ratio <= 0.85 and (p2[1] > p0[1] if is_bull else p2[1] < p0[1]):
-                        # Score: cercanía a 0.618 + recencia
-                        fib_score = 1 - abs(ratio-0.618)/0.618
-                        recency = max(0.2, 1 - gap/60)  # si gap 22 como tu ejemplo, recency ~0.63
-                        trend_align = 1.0
-                        # Precio actual debe estar saliendo del valle
-                        bounce = (current_price - p2[1])/p2[1]*100 if is_bull else (p2[1]-current_price)/p2[1]*100
-                        if bounce > -2:  # no debe haber roto el inicio de onda 1
-                            conf = (0.5 + fib_score*0.5) * recency
-                            hypotheses.append({
-                                "state": "FORMING_WAVE_3",
-                                "is_bullish": is_bull,
-                                "base_pivots": [p0,p1,p2],
-                                "w1_start": p0,
-                                "w1_end": p1,
-                                "w2_end": p2,
-                                "confidence": min(0.95, conf),
-                                "gap": gap,
-                                "reason": f"1-2 confirmado (W2 retra {ratio:.1%}), gap {gap} velas, bounce {bounce:+.1f}%",
-                                "next_target": "Onda 3",
-                                "alternatives": []
-                            })
+        # ---- HIPÓTESIS 1: FORMANDO ONDA 3 (onda 2 simple o compleja W-X-Y) ----
+        # Se prueba cada posible "fin de onda 1" (p1) en la ventana reciente y,
+        # para cada uno, se busca el extremo real de la corrección posterior
+        # con _find_correction_extreme -- sea de 1 pivote (ABC en V) o de
+        # varios (W-X-Y). Genera una hipótesis por candidato válido; luego se
+        # ordenan por confianza como el resto del código ya hacía.
+        window = pivots[-10:] if len(pivots) >= 10 else pivots
+        offset = len(pivots) - len(window)
+        for i in range(len(window)-1):
+            p1_pos = offset + i
+            if p1_pos == 0:
+                continue
+            p0 = pivots[p1_pos - 1]
+            p1 = pivots[p1_pos]
+            if p0[2] == p1[2]:
+                continue
+
+            is_bull = p0[2] == 'L' and p1[2] == 'H'
+            is_bear = p0[2] == 'H' and p1[2] == 'L'
+            if not (is_bull or is_bear):
+                continue
+
+            p2, correction_pivots = self._find_correction_extreme(pivots, p1_pos)
+            if p2 is None:
+                continue
+
+            w1 = abs(p1[1] - p0[1])
+            w2 = abs(p1[1] - p2[1])
+            ratio = w2 / w1 if w1 != 0 else 0
+
+            # Onda 2 no puede superar el 100% de la onda 1 (si no, invalida el conteo).
+            # El rango se abre respecto a la versión anterior (era 0.35-0.85) porque
+            # una W-X-Y compleja retrocede con más libertad que una simple onda en V.
+            not_broken = (p2[1] > p0[1]) if is_bull else (p2[1] < p0[1])
+            if not (0.236 <= ratio <= 1.0 and not_broken):
+                continue
+
+            gap_p2 = current_idx - p2[0]
+            bounce = (current_price - p2[1])/p2[1]*100 if is_bull else (p2[1]-current_price)/p2[1]*100
+            if bounce <= -2:
+                continue  # el precio siguió rompiendo: esto ya no es la onda 2
+
+            fib_score = 1 - abs(ratio-0.618)/0.618
+            recency = max(0.2, 1 - gap_p2/60)
+            is_complex = len(correction_pivots) > 1
+            # Las correcciones complejas son más ambiguas de leer con solo zigzag,
+            # así que arrancan con algo menos de confianza que una simple en V
+            complexity_penalty = 0.1 if is_complex else 0
+            conf = max(0.1, min(0.95, (0.5 + fib_score*0.5) * recency - complexity_penalty))
+
+            label = "W-X-Y / corrección compleja" if is_complex else "onda 2 simple"
+            hypotheses.append({
+                "state": "FORMING_WAVE_3",
+                "is_bullish": is_bull,
+                "base_pivots": [p0, p1] + correction_pivots,
+                "w1_start": p0,
+                "w1_end": p1,
+                "w2_end": p2,
+                "correction_pivots": correction_pivots,
+                "is_complex_correction": is_complex,
+                "confidence": conf,
+                "gap": gap_p2,
+                "reason": f"1-2 confirmado ({label}, retra {ratio:.1%}), gap {gap_p2} velas, bounce {bounce:+.1f}%",
+                "next_target": "Onda 3",
+                "alternatives": []
+            })
 
         # ---- HIPÓTESIS 2: FORMANDO ONDA 4 (tenemos 1-2-3) ----
         if len(pivots) >= 4:
@@ -507,17 +571,38 @@ class ChartEngine:
         # Onda activa (resaltada)
         if active_wave and active_wave.get('base_pivots'):
             bps = active_wave['base_pivots']
+            # Si la onda 2/4 es una corrección compleja (W-X-Y), esas piernas
+            # se dibujan aparte en naranja para distinguirlas del impulso 1-2
+            corr_pivots = active_wave.get('correction_pivots') or []
+            n_impulse_legs = len(bps) - len(corr_pivots)
             for i in range(len(bps)-1):
                 s_idx, s_price, _ = bps[i]
                 e_idx, e_price, _ = bps[i+1]
-                fig.add_trace(go.Scatter(
-                    x=[df.index[s_idx], df.index[e_idx]],
-                    y=[s_price, e_price],
-                    mode="lines+markers",
-                    name=f"Base activa {i+1}",
-                    line=dict(width=4, color='#00FF88'),
-                    marker=dict(size=10, color='#00FF88')
-                ))
+                is_correction_leg = i >= n_impulse_legs - 1
+                if is_correction_leg and corr_pivots:
+                    labels = ['W','X','Y','X2','Z']
+                    li = i - (n_impulse_legs - 1)
+                    label = labels[li] if li < len(labels) else str(li)
+                    fig.add_trace(go.Scatter(
+                        x=[df.index[s_idx], df.index[e_idx]],
+                        y=[s_price, e_price],
+                        mode="lines+markers+text",
+                        name=f"Corrección ({label})",
+                        text=["", f"({label})"],
+                        textposition="bottom center",
+                        line=dict(width=2, color='orange', dash='dot'),
+                        marker=dict(size=7, color='orange'),
+                        showlegend=False
+                    ))
+                else:
+                    fig.add_trace(go.Scatter(
+                        x=[df.index[s_idx], df.index[e_idx]],
+                        y=[s_price, e_price],
+                        mode="lines+markers",
+                        name=f"Base activa {i+1}",
+                        line=dict(width=4, color='#00FF88'),
+                        marker=dict(size=10, color='#00FF88')
+                    ))
             # Línea punteada hacia precio actual (proyección en curso)
             if len(bps) > 0:
                 last_bp = bps[-1]
@@ -569,8 +654,17 @@ class ElliottFibonacciStrategy:
         if not self.provider.validate_ticker(ticker.upper()):
             print(f"Advertencia: {ticker} no está en S&P500/NASDAQ100, pero se analizará igual.")
 
-        self.zigzag.deviation = deviation/100.0
         df = self.provider.get_data(ticker, period)
+        return self.analyze_dataframe(df, ticker, deviation)
+
+    def analyze_dataframe(self, df: pd.DataFrame, ticker: str, deviation: float = 5.0):
+        """
+        Igual que run(), pero recibe el DataFrame ya construido (columnas
+        Open/High/Low/Close/Volume, index de fechas) en vez de descargarlo con
+        yfinance. Así el mismo motor de Elliott/Fibonacci sirve tanto para
+        datos de Yahoo como para históricos traídos de IBKR u otra fuente.
+        """
+        self.zigzag.deviation = deviation/100.0
         df = TechnicalIndicators.add_moving_averages(df)
 
         pivots = self.zigzag.get_pivots(df)
@@ -635,12 +729,13 @@ class ElliottFibonacciStrategy:
             "precio_actual": round(current_price,2),
             "tendencia_MA": "Alcista" if sma20 > sma200 else "Bajista",
             "elliott_historico": elliott_result,
-            "active_wave": active_wave,  # NUEVO (de mi version 4): onda en curso con confianza
+            "active_wave": active_wave,  # NUEVO: onda en curso con confianza
             "fib_levels": fib_levels,
             "fib_extensions": fib_extensions,
             "last_pivot": {"price": pivots[-1][1], "type": pivots[-1][2], "gap": active_wave.get('gap',0)} if pivots else {},
             "señal": signal,
             "señal_detalle": signal_detail,
+            # Mantener compatibilidad con UI vieja
             "elliott": elliott_result,
         }
 

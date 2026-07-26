@@ -4,12 +4,12 @@ sys.path.append('.')
 from elliott_trader_pro import ElliottFibonacciStrategy
 import pandas as pd
 
-st.set_page_config(page_title="Elliott v4 Predictivo", layout="wide", page_icon="🔮")
+st.set_page_config(page_title="Elliott v4 Predictivo", layout="wide")
 
-st.title("🔮 Elliott v4 - Predictor de Siguiente Onda")
+st.title("Elliott v4 - Predictor de Siguiente Onda")
 
 with st.sidebar:
-    st.header("⚙️ Configuración")
+    st.header("Configuración")
     ticker = st.text_input("Ticker (ej: AAPL, NVDA, MSFT, TSLA)", value="AAPL").upper()
     period = st.selectbox("Periodo", ["1y", "2y", "5y", "max"], index=2)
     deviation = st.slider("Sensibilidad ZigZag %", 2.0, 25.0, 5.0, 0.5)
@@ -33,7 +33,7 @@ if run_btn:
 
             # Alerta STALE - tu bug reportado
             if aw.get('is_stale') or summary['elliott_historico'].get('is_stale'):
-                st.error(f"⚠️ PATRÓN VIEJO DETECTADO: El mejor impulso 1-5 terminó hace {aw.get('gap', summary['elliott_historico'].get('gap'))} velas. Proyección vieja anclada a estructura irrelevante. No usar para trading. Esperar nuevo 1-2.")
+                st.error(f"PATRÓN VIEJO DETECTADO: El mejor impulso 1-5 terminó hace {aw.get('gap', summary['elliott_historico'].get('gap'))} velas. Proyección vieja anclada a estructura irrelevante. No usar para trading. Esperar nuevo 1-2.")
 
             st.plotly_chart(fig, use_container_width=True)
 
@@ -47,7 +47,7 @@ if run_btn:
 
             st.markdown(f"**Razonamiento:** {aw['reason']}")
             if aw.get('is_bullish') is not None:
-                st.markdown(f"**Dirección:** {'🟢 Alcista' if aw['is_bullish'] else '🔴 Bajista'}")
+                st.markdown(f"**Dirección:** {'Alcista' if aw['is_bullish'] else 'Bajista'}")
 
             c1, c2, c3 = st.columns(3)
             with c1:
