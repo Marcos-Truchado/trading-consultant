@@ -1,3 +1,5 @@
+MAC:
+
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -10,4 +12,15 @@ opcion2:
  python3 elliott_trader_pro.py --ticker WYFI --period 1y --deviation 3.0
 
 opcion 3:
+streamlit run dashboard_ibkr.py
+
+
+WIN:
+
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+pip install curl_cffi
+pip install ib_insync
+
 streamlit run dashboard_ibkr.py
