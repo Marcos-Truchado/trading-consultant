@@ -2,14 +2,18 @@
 SMC Engine - Smart Money Concepts
 BOS, CHOCH, Order Blocks, Fair Value Gaps, Liquidity Sweeps
 Todo visual para el cockpit
+
+Umbrales de score y lookbacks en config.py (SMCConfig) -- sin validar
+contra backtest todavía.
 """
 import pandas as pd
 import numpy as np
 from typing import List, Tuple, Dict
+from config import SMC, SMCConfig
 
 class SMCEngine:
-    def __init__(self):
-        pass
+    def __init__(self, cfg: SMCConfig = SMC):
+        self.cfg = cfg
 
     def _get_pivot_highs_lows(self, df: pd.DataFrame, order=5):
         highs = []
@@ -52,19 +56,23 @@ class SMCEngine:
                 choch_events.append({"type": "CHOCH", "price": last_highs[-1][1] if hh else last_lows[-1][1], "idx": pivots[-1][0], "reason": "Cambio de carácter - posible reversal"})
 
         # Score
+        # Nota: BULL y BEAR puntúan igual porque el ajuste real de dirección
+        # (si este trend SMC alinea con Elliott o no) lo hace scoring_engine
+        # comparando contra is_bullish; aquí solo se puntúa "hay estructura
+        # clara" vs "no la hay".
         score_mod = 0
         if trend == "BULL":
-            score_mod = 15
+            score_mod = self.cfg.score_bos_bull
         elif trend == "BEAR":
-            score_mod = 15  # no - porque depende si tu Elliott es bear
+            score_mod = self.cfg.score_bos_bear
         elif trend == "CHOCH":
-            score_mod = -5
+            score_mod = self.cfg.score_choch
 
         return {"bos": bos_events, "choch": choch_events, "trend": trend, "score_mod": score_mod, "reason": f"SMC Trend {trend}"}
 
-    def find_fvg(self, df: pd.DataFrame, lookback=50) -> List[Dict]:
+    def find_fvg(self, df: pd.DataFrame, lookback=None) -> List[Dict]:
         fvgs = []
-        df_slice = df.tail(lookback)
+        df_slice = df.tail(lookback or self.cfg.fvg_lookback)
         for i in range(1, len(df_slice)-1):
             idx = df_slice.index[i]
             prev_high = df_slice['High'].iloc[i-1]
@@ -108,9 +116,10 @@ class SMCEngine:
                 recent.append(f)
         return recent[-4:]
 
-    def find_order_blocks(self, df: pd.DataFrame, lookback=60) -> List[Dict]:
+    def find_order_blocks(self, df: pd.DataFrame, lookback=None) -> List[Dict]:
         obs = []
-        df_s = df.tail(lookback)
+        df_s = df.tail(lookback or self.cfg.ob_lookback)
+        min_move = self.cfg.ob_min_move_pct
         for i in range(2, len(df_s)-2):
             # OB alcista: última vela bajista antes de movimiento alcista fuerte
             # simplificado: vela bajista con mecha baja + siguiente vela cierra > 1% arriba
@@ -119,7 +128,7 @@ class SMCEngine:
             # Bull OB
             if curr['Close'] < curr['Open'] and next_c['Close'] > curr['High'] * 1.005:
                 move = (df_s['Close'].iloc[i+2:i+5].max() - curr['Low']) / curr['Low'] * 100 if i+5 < len(df_s) else 0
-                if move > 2:
+                if move > min_move:
                     obs.append({
                         "type": "BULL_OB",
                         "high": float(curr['High']),
@@ -130,7 +139,7 @@ class SMCEngine:
             # Bear OB
             if curr['Close'] > curr['Open'] and next_c['Close'] < curr['Low'] * 0.995:
                 move = (curr['High'] - df_s['Close'].iloc[i+2:i+5].min()) / curr['High'] * 100 if i+5 < len(df_s) else 0
-                if move > 2:
+                if move > min_move:
                     obs.append({
                         "type": "BEAR_OB",
                         "high": float(curr['High']),
@@ -151,9 +160,9 @@ class SMCEngine:
 
         # Bearish sweep = barre high y cierra abajo
         if prev['High'] > recent_high * 0.999 and last['Close'] < recent_high and last['High'] > recent_high:
-            return {"sweep": True, "type": "BEAR_SWEEP", "price": float(recent_high), "reason": f"Barrido de liquidez alcista en {recent_high:.2f} - posible techo onda 5", "score_mod": -10}
+            return {"sweep": True, "type": "BEAR_SWEEP", "price": float(recent_high), "reason": f"Barrido de liquidez alcista en {recent_high:.2f} - posible techo onda 5", "score_mod": self.cfg.score_sweep_bear}
         if prev['Low'] < recent_low * 1.001 and last['Close'] > recent_low and last['Low'] < recent_low:
-            return {"sweep": True, "type": "BULL_SWEEP", "price": float(recent_low), "reason": f"Barrido de liquidez bajista en {recent_low:.2f} - posible suelo", "score_mod": 10}
+            return {"sweep": True, "type": "BULL_SWEEP", "price": float(recent_low), "reason": f"Barrido de liquidez bajista en {recent_low:.2f} - posible suelo", "score_mod": self.cfg.score_sweep_bull}
         return {"sweep": False, "type": "NONE", "reason": "Sin barridos recientes", "score_mod": 0}
 
     def analyze(self, df: pd.DataFrame, pivots: List[Tuple[int,float,str]]) -> dict:
@@ -168,8 +177,8 @@ class SMCEngine:
         curr_price = float(df['Close'].iloc[-1])
         for ob in obs:
             dist = abs(ob['low'] - curr_price) / curr_price * 100 if ob['type']=='BULL_OB' else abs(ob['high'] - curr_price) / curr_price * 100
-            if dist < 3:
-                total_score += 10
+            if dist < self.cfg.ob_proximity_pct:
+                total_score += self.cfg.score_ob_confluence
 
         return {
             "bos_choch": bos_data,

@@ -1,14 +1,19 @@
 """
 Risk Manager - Calcula Entry, Stop, TPs, RR para el analizador
 No ejecuta, solo planifica
+
+Los multiplicadores de ATR, el RR mínimo y los RR de fallback viven en
+config.py (RiskConfig) -- puestos a mano, sin validar contra backtest.
 """
 import pandas as pd
 import numpy as np
 from typing import Dict, List
+from config import RISK, RiskConfig
 
 class RiskManager:
-    def __init__(self, atr_period=14):
-        self.atr_period = atr_period
+    def __init__(self, cfg: RiskConfig = RISK):
+        self.cfg = cfg
+        self.atr_period = cfg.atr_period
 
     def _calc_atr(self, df: pd.DataFrame):
         high_low = df['High'] - df['Low']
@@ -18,6 +23,7 @@ class RiskManager:
         return tr.rolling(self.atr_period).mean().iloc[-1]
 
     def calculate(self, df: pd.DataFrame, active_wave: Dict, smc: Dict, fib_extensions: Dict, current_price: float) -> Dict:
+        cfg = self.cfg
         # Entry = precio actual (para analizador)
         entry = current_price
         is_bull = active_wave.get('is_bullish')
@@ -31,7 +37,7 @@ class RiskManager:
             if w2_end:
                 # Stop bajo W2 + buffer ATR
                 atr = self._calc_atr(df)
-                buffer = atr * 0.5 if not pd.isna(atr) else current_price*0.01
+                buffer = atr * cfg.atr_stop_buffer_mult if not pd.isna(atr) else current_price*0.01
                 if is_bull:
                     stop = w2_end[1] - buffer
                     stop_reason = f"Bajo W2 {w2_end[1]:.2f} - buffer ATR {buffer:.2f}"
@@ -42,7 +48,7 @@ class RiskManager:
             w4_end = active_wave.get('w4_end')
             if w4_end:
                 atr = self._calc_atr(df)
-                buffer = atr * 0.5 if not pd.isna(atr) else current_price*0.01
+                buffer = atr * cfg.atr_stop_buffer_mult if not pd.isna(atr) else current_price*0.01
                 if is_bull:
                     stop = w4_end[1] - buffer
                     stop_reason = f"Bajo W4 {w4_end[1]:.2f}"
@@ -50,14 +56,14 @@ class RiskManager:
                     stop = w4_end[1] + buffer
                     stop_reason = f"Sobre W4 {w4_end[1]:.2f}"
         else:
-            # Fallback ATR stop 2x
+            # Fallback ATR stop
             atr = self._calc_atr(df)
             if not pd.isna(atr):
-                stop = entry - atr*2 if is_bull else entry + atr*2
-                stop_reason = f"ATR 2x fallback ({atr:.2f})"
+                stop = entry - atr*cfg.atr_fallback_stop_mult if is_bull else entry + atr*cfg.atr_fallback_stop_mult
+                stop_reason = f"ATR {cfg.atr_fallback_stop_mult}x fallback ({atr:.2f})"
             else:
-                stop = entry * 0.97 if is_bull else entry * 1.03
-                stop_reason = "3% fallback"
+                stop = entry * (1 - cfg.pct_fallback_stop) if is_bull else entry * (1 + cfg.pct_fallback_stop)
+                stop_reason = f"{cfg.pct_fallback_stop:.0%} fallback"
 
         # TPs desde Fib extensions
         tps = []
@@ -70,16 +76,11 @@ class RiskManager:
         # Si no hay extensiones, usar RR
         if not tps and stop is not None:
             risk = abs(entry - stop)
-            if is_bull:
-                tps = [
-                    {"level": "TP1 RR 1.5", "price": entry + risk*1.5},
-                    {"level": "TP2 RR 2.5", "price": entry + risk*2.5},
-                ]
-            else:
-                tps = [
-                    {"level": "TP1 RR 1.5", "price": entry - risk*1.5},
-                    {"level": "TP2 RR 2.5", "price": entry - risk*2.5},
-                ]
+            sign = 1 if is_bull else -1
+            tps = [
+                {"level": f"TP1 RR {cfg.tp1_rr}", "price": entry + sign*risk*cfg.tp1_rr},
+                {"level": f"TP2 RR {cfg.tp2_rr}", "price": entry + sign*risk*cfg.tp2_rr},
+            ]
 
         # Calcular RR
         rr1 = None
@@ -90,8 +91,8 @@ class RiskManager:
                 rr1 = abs(tps[0]['price'] - entry) / risk if len(tps)>0 else None
                 rr2 = abs(tps[1]['price'] - entry) / risk if len(tps)>1 else None
 
-        # Validación: RR mínimo 1.5
-        valid = rr1 is not None and rr1 >= 1.2
+        # Validación: RR mínimo (config.RISK.min_valid_rr)
+        valid = rr1 is not None and rr1 >= cfg.min_valid_rr
 
         return {
             "entry": float(entry),

@@ -1,16 +1,22 @@
 """
 Volume Profile Engine
 POC, Value Area, y validación de Fibs
+
+Bins, lookback y umbrales de distancia al POC en config.py
+(VolumeProfileConfig) -- sin validar contra backtest todavía.
 """
 import pandas as pd
 import numpy as np
 from typing import Dict
+from config import VOLUME_PROFILE, VolumeProfileConfig
 
 class VolumeProfileEngine:
-    def __init__(self, bins=40):
-        self.bins = bins
+    def __init__(self, cfg: VolumeProfileConfig = VOLUME_PROFILE):
+        self.cfg = cfg
+        self.bins = cfg.bins
 
-    def analyze(self, df: pd.DataFrame, lookback=200) -> Dict:
+    def analyze(self, df: pd.DataFrame, lookback=None) -> Dict:
+        lookback = lookback or self.cfg.lookback
         df_slice = df.tail(lookback) if len(df) > lookback else df
         if 'Volume' not in df_slice.columns or df_slice['Volume'].sum() == 0:
             return {"poc": None, "vah": None, "val": None, "reason": "Sin volumen", "score_mod": 0, "confluence": []}
@@ -42,7 +48,7 @@ class VolumeProfileEngine:
 
         # Value Area = 70% del volumen alrededor de POC
         total_vol = vol_profile.sum()
-        target_vol = total_vol * 0.7
+        target_vol = total_vol * self.cfg.value_area_pct
         # Expandir desde POC
         va_low = poc_idx
         va_high = poc_idx
@@ -69,11 +75,11 @@ class VolumeProfileEngine:
         # Score: si precio está cerca de POC, es zona de alta liquidez (buena para rebotes)
         score_mod = 0
         reason = f"POC ${poc_price:.2f} dist {dist_poc:.1f}% | VA {val:.2f}-{vah:.2f}"
-        if dist_poc < 1.5:
-            score_mod = 10
+        if dist_poc < self.cfg.dist_poc_high_conf_pct:
+            score_mod = self.cfg.score_poc_close
             reason += " - Precio en POC, alta confluencia"
-        elif dist_poc < 3:
-            score_mod = 5
+        elif dist_poc < self.cfg.dist_poc_medium_conf_pct:
+            score_mod = self.cfg.score_poc_medium
 
         # Para confluencia con Fibs, se calculará en scoring_engine
         hist = [{"price": float((bins[i]+bins[i+1])/2), "vol": float(vol_profile[i])} for i in range(len(vol_profile))]

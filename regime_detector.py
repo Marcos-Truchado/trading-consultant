@@ -1,15 +1,20 @@
 """
 Regime Detector - Filtro ON/OFF para Elliott
 Determina si el mercado está en tendencia, rango o alta volatilidad.
+
+Umbrales (ADX 25, Chop 55/61.8, percentil ATR 85, puntos por régimen) en
+config.py (RegimeConfig) -- sin validar contra backtest todavía.
 """
 import pandas as pd
 import numpy as np
+from config import REGIME, RegimeConfig
 
 class RegimeDetector:
-    def __init__(self, adx_period=14, atr_period=14, chop_period=14):
+    def __init__(self, adx_period=14, atr_period=14, chop_period=14, cfg: RegimeConfig = REGIME):
         self.adx_period = adx_period
         self.atr_period = atr_period
         self.chop_period = chop_period
+        self.cfg = cfg
 
     def _calc_atr(self, df: pd.DataFrame):
         high_low = df['High'] - df['Low']
@@ -46,7 +51,8 @@ class RegimeDetector:
         return chop
 
     def analyze(self, df: pd.DataFrame) -> dict:
-        if len(df) < 100:
+        cfg = self.cfg
+        if len(df) < cfg.min_bars:
             return {"regime": "UNKNOWN", "reason": "Pocos datos", "tradeable": False, "score_mod": 0}
 
         adx, plus_di, minus_di = self._calc_adx(df)
@@ -63,29 +69,29 @@ class RegimeDetector:
         atr_percentile = (atr.tail(200) < curr_atr).mean() * 100 if len(atr) >= 200 else 50
 
         # Lógica de régimen
-        if curr_adx > 25 and curr_chop < 55:
+        if curr_adx > cfg.adx_trending and curr_chop < cfg.chop_trending_max:
             regime = "TRENDING"
             tradeable = True
             reason = f"Tendencia fuerte ADX {curr_adx:.1f}, Chop {curr_chop:.1f}"
-            score_mod = 15
+            score_mod = cfg.score_trending
             trend_dir = "BULL" if curr_plus > curr_minus else "BEAR"
-        elif curr_chop > 61.8:
+        elif curr_chop > cfg.chop_ranging_min:
             regime = "RANGING"
             tradeable = False
-            reason = f"Lateral - Chop {curr_chop:.1f} > 61.8, ADX {curr_adx:.1f}"
-            score_mod = -30
+            reason = f"Lateral - Chop {curr_chop:.1f} > {cfg.chop_ranging_min}, ADX {curr_adx:.1f}"
+            score_mod = cfg.score_ranging
             trend_dir = "NEUTRAL"
-        elif atr_percentile > 85:
+        elif atr_percentile > cfg.atr_percentile_high_vol:
             regime = "HIGH_VOL"
             tradeable = True
             reason = f"Alta volatilidad ATR perc {atr_percentile:.0f}%, peligro en Onda 5"
-            score_mod = -10
+            score_mod = cfg.score_high_vol
             trend_dir = "BULL" if curr_plus > curr_minus else "BEAR"
         else:
             regime = "TRANSITION"
             tradeable = True
             reason = f"Transición ADX {curr_adx:.1f} Chop {curr_chop:.1f}"
-            score_mod = 0
+            score_mod = cfg.score_transition
             trend_dir = "BULL" if curr_plus > curr_minus else "BEAR"
 
         return {

@@ -2,7 +2,8 @@
 Dashboard IBKR - Análisis + Operativa MANUAL
 =============================================
 Trae histórico desde tu propia cuenta IBKR (via TWS/IB Gateway local), lo pasa
-por el motor Elliott/Fibonacci, y te deja ver tu cartera real.
+por el pipeline de análisis (pipeline.run_full_analysis), y te deja ver tu
+cartera real.
 
 La parte de enviar órdenes está separada del análisis a propósito: el score o
 la lectura de Elliott NUNCA disparan una orden. Solo tú, pulsando el botón y
@@ -14,27 +15,44 @@ import streamlit as st
 import sys
 sys.path.append('.')
 import pandas as pd
-from elliott_trader_pro import ElliottFibonacciStrategy
-from regime_detector import RegimeDetector
-from momentum_engine import MomentumEngine
-from smc_engine import SMCEngine
-from volume_profile import VolumeProfileEngine
-from mtf_analyzer import MTFAnalyzer
-from scoring_engine import ScoringEngine
-from risk_manager import RiskManager
+from pipeline import run_full_analysis
 from chart_engine_v4 import ChartEngineV4
 from ibkr_connector import IBKRConnector
 
 st.set_page_config(page_title="Dashboard IBKR", layout="wide")
 st.title("Dashboard IBKR - Análisis + Operativa Manual")
 
+# Puertos estándar de IBKR. OJO: en IB Gateway 4001 es la cuenta REAL y 4002
+# es paper -- justo al revés de lo que uno esperaría. Antes el dashboard
+# asumía "4001 = Paper" en el texto de ayuda y en la casilla de confirmación
+# de la orden, lo cual era falso y podía hacer pensar que estabas en paper
+# estando en real. Se corrige mapeando el puerto explícitamente.
+IBKR_PORT_LABELS = {
+    7497: "TWS - Paper Trading",
+    7496: "TWS - Cuenta REAL",
+    4002: "IB Gateway - Paper Trading",
+    4001: "IB Gateway - Cuenta REAL",
+}
+
+
+def port_label(port: int) -> str:
+    return IBKR_PORT_LABELS.get(int(port), "Puerto no reconocido - verifica en TWS/Gateway si es Paper o Real")
+
+
+def is_live_port(port: int) -> bool:
+    return int(port) in (7496, 4001)
+
+
 # ---------------- Conexión ----------------
 with st.sidebar:
     st.header("Conexión IBKR")
-    host = st.text_input("Host", value="127.0.0.1") 
+    host = st.text_input("Host", value="127.0.0.1")
     # localhost, mas tarde lo haré como un sistema distribuido para conectar varias cuentas ajenas
-    port = st.number_input("Puerto", value=4001, step=1,
-                            help="4001 = Paper Trading | 4001 = Real | 4002/4001 = IB Gateway")
+    port = st.number_input("Puerto", value=7497, step=1,
+                            help="TWS: 7497 Paper / 7496 Real  |  IB Gateway: 4002 Paper / 4001 Real")
+    st.caption(f"Detectado: **{port_label(port)}**")
+    if is_live_port(port):
+        st.warning("⚠️ Este puerto es de CUENTA REAL, no paper trading.")
     client_id = st.number_input("Client ID", value=1, step=1)
 
     if "ibkr" not in st.session_state:
@@ -101,28 +119,28 @@ if analizar_btn:
     if not ibkr or not ibkr.connected:
         st.error("Conéctate a IBKR primero (panel izquierdo).")
     else:
-        with st.spinner(f"Trayendo histórico de {ticker} desde IBKR y analizando en 6 motores..."):
+        with st.spinner(f"Trayendo histórico de {ticker} desde IBKR y analizando en 8 motores..."):
             try:
-                df = ibkr.get_historical_bars(ticker, duration=period, bar_size=bar_size)
-                if df is None or len(df) < 30:
+                raw_df = ibkr.get_historical_bars(ticker, duration=period, bar_size=bar_size)
+                if raw_df is None or len(raw_df) < 30:
                     st.error("IBKR no devolvió suficientes datos. Revisa el ticker o el permiso de mercado de datos delayed.")
                 else:
-                    # 1. Elliott base (idéntico motor que app.py, pero con datos de IBKR)
-                    engine = ElliottFibonacciStrategy(deviation_pct=deviation)
-                    df, summary, _ = engine.analyze_dataframe(df, ticker, deviation=deviation)
+                    # Todo el pipeline (Elliott + Regime + Momentum + SMC +
+                    # Volume Profile + MTF + Scoring + Risk) vive ahora en
+                    # pipeline.run_full_analysis -- una sola fuente de verdad
+                    # en vez de estar copiado aquí.
+                    result = run_full_analysis(raw_df, ticker, deviation, ibkr=ibkr)
+                    df = result["df"]
+                    summary = result["summary"]
+                    aw = result["active_wave"]
+                    regime = result["regime"]
+                    momentum = result["momentum"]
+                    smc = result["smc"]
+                    vol_prof = result["vol_prof"]
+                    mtf = result["mtf"]
+                    risk = result["risk"]
+                    scoring = result["scoring"]
                     st.session_state.last_summary = summary
-                    aw = summary['active_wave']
-                    pivots = engine.zigzag.get_pivots(df)  # recalculamos para SMC, igual que app.py
-
-                    # 2. Mismos 6 motores que app.py (antes NO se ejecutaban aquí -> por
-                    # eso faltaban soportes/resistencias y demás datos frente a app.py)
-                    regime = RegimeDetector().analyze(df)
-                    momentum = MomentumEngine().analyze(df)
-                    smc = SMCEngine().analyze(df, pivots)
-                    vol_prof = VolumeProfileEngine().analyze(df)
-                    mtf = MTFAnalyzer().analyze(ticker, deviation=deviation, ibkr=ibkr)
-                    risk = RiskManager().calculate(df, aw, smc, summary.get('fib_extensions', {}), summary['precio_actual'])
-                    scoring = ScoringEngine().calculate(aw, regime, momentum, smc, vol_prof, mtf, summary['fib_levels'], summary['precio_actual'])
 
                     # 3. Veredicto principal
                     st.divider()
@@ -146,7 +164,7 @@ if analizar_btn:
                     if not regime['tradeable']:
                         st.error(f"REGIMEN BLOQUEA: {regime['reason']}")
 
-                    # 4. Gráfico Pro v4 (antes se usaba el ChartEngine viejo sin SMC/VP/Risk)
+                    # 4. Gráfico Pro v4
                     fig_v4 = ChartEngineV4.plot(df, ticker, summary['elliott_historico'], summary['fib_levels'], summary.get('fib_extensions', {}), aw, smc, vol_prof, risk, show_ob, show_fvg, show_vp)
                     st.plotly_chart(fig_v4, use_container_width=True)
                     st.caption(f"Razonamiento: {aw['reason']}")
@@ -161,13 +179,27 @@ if analizar_btn:
 
                     if niveles:
                         precio_actual = summary['precio_actual']
+                        # La etiqueta de cada nivel depende de si está a favor o en
+                        # contra de la dirección que ya detectó Elliott (aw['is_bullish']).
+                        # Antes se etiquetaba SOLO por estar por encima/debajo del precio,
+                        # así que en un conteo bajista (ej. CELH en FORMING_WAVE_4) un
+                        # nivel inferior salía como "SOPORTE (posible compra)" aunque el
+                        # veredicto de arriba fuera SELL -- contradicción pura de UI, la
+                        # onda/score ya estaban bien.
+                        is_bull_dir = aw.get('is_bullish')
                         filas = []
                         for n in niveles:
                             dist_pct = (n["precio"] - precio_actual) / precio_actual * 100
-                            if n["precio"] < precio_actual:
-                                zona = "🟢 SOPORTE (posible compra)"
-                            elif n["precio"] > precio_actual:
-                                zona = "🔴 RESISTENCIA (objetivo / posible venta)"
+                            below = n["precio"] < precio_actual
+                            above = n["precio"] > precio_actual
+                            if is_bull_dir is None:
+                                zona = "🟢 Nivel inferior" if below else ("🔴 Nivel superior" if above else "⚪ En precio actual")
+                            elif below:
+                                zona = "🟢 SOPORTE (a favor de la tendencia alcista)" if is_bull_dir \
+                                    else "🟡 Nivel inferior (en contra de tendencia bajista, no es señal de compra)"
+                            elif above:
+                                zona = "🔴 RESISTENCIA (objetivo bajista / posible corto)" if not is_bull_dir \
+                                    else "🟡 Nivel superior (en contra de tendencia alcista, no es señal de venta)"
                             else:
                                 zona = "⚪ En precio actual"
                             filas.append({
@@ -183,11 +215,11 @@ if analizar_btn:
                             del f["_dist_abs"]
                         niveles_df = pd.DataFrame(filas)
                         st.dataframe(niveles_df, use_container_width=True, hide_index=True)
-                        st.caption("Soportes = posibles zonas de entrada en compra si el precio corrige hacia ahí. Resistencias = objetivos de toma de beneficio o posible zona de venta/cortocircuito.")
+                        st.caption("Los niveles se etiquetan según la dirección que ya detectó Elliott (arriba), no solo por estar por encima o debajo del precio: un nivel 'a favor' es soporte/resistencia operable, uno 'en contra' es solo estructura a vigilar.")
                     else:
                         st.info(f"Sin niveles Fibonacci calculados para el tramo activo actual (estado: {aw['state']}).")
 
-                    # 6. Tabs de análisis (idénticos a app.py)
+                    # 6. Tabs de análisis
                     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Desglose Score", "Confluencia", "Riesgo", "MTF", "Elliott Detalle"])
 
                     with tab1:
@@ -241,6 +273,9 @@ if analizar_btn:
                                 c4.metric("TP2", f"${risk['tps'][1]['price']:.2f}", f"RR {risk['rr2']:.2f}" if risk['rr2'] else "")
                         st.divider()
                         if not risk['valid_rr']:
+                            # Bug fijo: antes el condicional iba dentro del format spec
+                            # (f"{risk['rr1']:.2f if risk['rr1'] else 0}"), lo cual es un
+                            # format spec inválido y lanzaba ValueError en esta rama.
                             rr1_txt = f"{risk['rr1']:.2f}" if risk['rr1'] else "0"
                             st.warning(f"RR {rr1_txt} bajo (<1.2). Aunque el score sea bueno, el trade no compensa riesgo. Busca entrada más cercana a invalidación.")
                         else:
@@ -300,9 +335,10 @@ else:
         if o_type == "Limit":
             o_limit_price = st.number_input("Precio límite", min_value=0.01, value=1.0, step=0.01)
 
+        modo_cuenta = "⚠️ CUENTA REAL" if is_live_port(port) else "PAPER"
         confirmo = st.checkbox(
-            f"Confirmo que quiero enviar esta orden AHORA a {'PAPER' if int(port)==4001 else 'CUENTA REAL'} "
-            f"({host}:{port})"
+            f"Confirmo que quiero enviar esta orden AHORA a {modo_cuenta} "
+            f"({port_label(port)}, {host}:{port})"
         )
         enviar = st.form_submit_button("Enviar orden", type="primary", disabled=not confirmo)
 

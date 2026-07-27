@@ -5,14 +5,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 pip install curl_cffi
 pip install ib_insync
-opcion 1:
-streamlit run app.py
-
-opcion2:
- python3 elliott_trader_pro.py --ticker WYFI --period 1y --deviation 3.0
-
-opcion 3:
+opcion 1 (dashboard, requiere TWS/IB Gateway abierto):
 streamlit run dashboard_ibkr.py
+
+opcion 2 (CLI suelto, solo Elliott/Fib, sin IBKR):
+ python3 elliott_trader_pro.py --ticker WYFI --period 1y --deviation 3.0
 
 
 WIN:
