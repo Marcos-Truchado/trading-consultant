@@ -18,9 +18,13 @@ import pandas as pd
 from pipeline import run_full_analysis
 from chart_engine_v4 import ChartEngineV4
 from ibkr_connector import IBKRConnector
+import ui_theme
+import analysis_history
 
-st.set_page_config(page_title="Dashboard IBKR", layout="wide")
-st.title("Dashboard IBKR - Análisis + Operativa Manual")
+analysis_history.ensure_table()
+
+st.set_page_config(page_title="Trading Consultant", layout="wide", page_icon="📈")
+ui_theme.inject_theme()
 
 # Puertos estándar de IBKR. OJO: en IB Gateway 4001 es la cuenta REAL y 4002
 # es paper -- justo al revés de lo que uno esperaría. Antes el dashboard
@@ -41,6 +45,198 @@ def port_label(port: int) -> str:
 
 def is_live_port(port: int) -> bool:
     return int(port) in (7496, 4001)
+
+
+def render_analysis(ticker: str, period: str, bar_size: str, deviation: float, ibkr, show_ob, show_fvg, show_vp):
+    """Corre el pipeline completo y pinta resumen, gráfico, niveles y tabs.
+
+    Devuelve el dict 'result' de run_full_analysis (o None si no hay datos)
+    para que el llamador pueda guardarlo en el historial.
+    """
+    with st.spinner(f"Trayendo histórico de {ticker} desde IBKR y analizando en 8 motores..."):
+        raw_df = ibkr.get_historical_bars(ticker, duration=period, bar_size=bar_size)
+        if raw_df is None or len(raw_df) < 30:
+            st.error("IBKR no devolvió suficientes datos. Revisa el ticker o el permiso de mercado de datos delayed.")
+            return None
+        result = run_full_analysis(raw_df, ticker, deviation, ibkr=ibkr)
+        df = result["df"]
+        summary = result["summary"]
+        aw = result["active_wave"]
+        regime = result["regime"]
+        momentum = result["momentum"]
+        smc = result["smc"]
+        vol_prof = result["vol_prof"]
+        mtf = result["mtf"]
+        risk = result["risk"]
+        scoring = result["scoring"]
+        st.session_state.last_summary = summary
+
+        # Resumen ejecutivo estilo Apple
+        summary["regime_block"] = regime["reason"] if not regime["tradeable"] else None
+        st.markdown(ui_theme.exec_summary_html(scoring, aw, summary, risk), unsafe_allow_html=True)
+
+        # Gráfico Pro v4
+        fig_v4 = ChartEngineV4.plot(df, ticker, summary['elliott_historico'], summary['fib_levels'], summary.get('fib_extensions', {}), aw, smc, vol_prof, risk, show_ob, show_fvg, show_vp)
+        st.plotly_chart(fig_v4, use_container_width=True)
+        st.caption(f"Razonamiento: {aw['reason']}")
+
+        # Soportes (posible zona de compra) / Resistencias (objetivo o venta)
+        st.subheader("📐 Niveles clave: soportes y resistencias (Fibonacci sobre tramo activo)")
+        niveles = []
+        for k, v in summary['fib_levels'].items():
+            niveles.append({"tipo": "Retroceso", "nivel": f"{k*100:.1f}%", "precio": v})
+        for k, v in summary.get('fib_extensions', {}).items():
+            niveles.append({"tipo": "Extensión", "nivel": f"{k*100:.0f}%", "precio": v})
+
+        if niveles:
+            precio_actual = summary['precio_actual']
+            is_bull_dir = aw.get('is_bullish')
+            filas = []
+            for n in niveles:
+                dist_pct = (n["precio"] - precio_actual) / precio_actual * 100
+                below = n["precio"] < precio_actual
+                above = n["precio"] > precio_actual
+                if is_bull_dir is None:
+                    zona = "🟢 Nivel inferior" if below else ("🔴 Nivel superior" if above else "⚪ En precio actual")
+                elif below:
+                    zona = "🟢 SOPORTE (a favor de la tendencia alcista)" if is_bull_dir \
+                        else "🟡 Nivel inferior (en contra de tendencia bajista, no es señal de compra)"
+                elif above:
+                    zona = "🔴 RESISTENCIA (objetivo bajista / posible corto)" if not is_bull_dir \
+                        else "🟡 Nivel superior (en contra de tendencia alcista, no es señal de venta)"
+                else:
+                    zona = "⚪ En precio actual"
+                filas.append({
+                    "Zona": zona,
+                    "Tipo Fib": n["tipo"],
+                    "Nivel": n["nivel"],
+                    "Precio": f"${n['precio']:.2f}",
+                    "Distancia": f"{dist_pct:+.2f}%",
+                    "_dist_abs": abs(dist_pct),
+                })
+            filas.sort(key=lambda r: r["_dist_abs"])
+            for f in filas:
+                del f["_dist_abs"]
+            niveles_df = pd.DataFrame(filas)
+            st.dataframe(niveles_df, use_container_width=True, hide_index=True)
+            st.caption("Los niveles se etiquetan según la dirección que ya detectó Elliott (arriba), no solo por estar por encima o debajo del precio: un nivel 'a favor' es soporte/resistencia operable, uno 'en contra' es solo estructura a vigilar.")
+        else:
+            st.info(f"Sin niveles Fibonacci calculados para el tramo activo actual (estado: {aw['state']}).")
+
+        # Tabs de análisis
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Desglose Score", "Confluencia", "Riesgo", "MTF", "Elliott Detalle", "Historial"])
+
+        with tab1:
+            st.subheader("Por qué este score")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.json(scoring['breakdown'])
+                for r in scoring['reasons']:
+                    if "+-" in r or "+" in r or "-" in r:
+                        if "-" in r and "+" not in r.split("-")[-1]:
+                            st.write(f"🔻 {r}")
+                        else:
+                            st.write(f"✅ {r}")
+                    else:
+                        st.write(f"• {r}")
+            with c2:
+                st.markdown(f"**Regime:** {regime['regime']} ADX {regime['adx']:.1f} Chop {regime['choppiness']:.1f}")
+                st.markdown(f"**Momentum:** RSI {momentum['rsi']:.1f} | {momentum['mom_state']} | Div: {momentum['divergence']}")
+                st.markdown(f"**SMC Trend:** {smc['trend_smc']} | BOS: {len(smc['bos_choch']['bos'])} CHOCH: {len(smc['bos_choch']['choch'])}")
+                st.markdown(f"**Vol Profile:** POC ${vol_prof.get('poc','-')} | Dist {vol_prof.get('dist_poc_pct',0):.1f}%")
+                st.markdown(f"**MTF:** {mtf['alignment']} | {mtf['reason']}")
+
+        with tab2:
+            colA, colB, colC = st.columns(3)
+            with colA:
+                st.subheader("Regime Filter")
+                st.json(regime)
+                st.subheader("Momentum & Divergence")
+                st.json({k: v for k, v in momentum.items() if k not in ['rsi_series', 'macd_hist_series']})
+            with colB:
+                st.subheader("SMC - Smart Money")
+                st.write(f"**BOS/CHOCH:** {smc['bos_choch']['reason']}")
+                st.json(smc['bos_choch'])
+                st.write(f"**Liquidity Sweep:** {smc['liquidity_sweep']['reason']}")
+                st.json(smc['liquidity_sweep'])
+            with colC:
+                st.subheader("Volume Profile")
+                st.json({k: v for k, v in vol_prof.items() if k != 'histogram'})
+                st.subheader("Order Blocks & FVGs")
+                st.write("OBs activos:", smc['order_blocks'])
+                st.write("FVGs activos:", smc['fvg'])
+
+        with tab3:
+            st.subheader("Plan de trade (no es ejecución, es análisis)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Entry", f"${risk['entry']:.2f}")
+            c2.metric("Stop Loss", f"${risk['stop']:.2f}" if risk['stop'] else "-", risk['stop_reason'])
+            if risk['tps']:
+                c3.metric("TP1", f"${risk['tps'][0]['price']:.2f}", f"RR {risk['rr1']:.2f}" if risk['rr1'] else "")
+                if len(risk['tps']) > 1:
+                    c4.metric("TP2", f"${risk['tps'][1]['price']:.2f}", f"RR {risk['rr2']:.2f}" if risk['rr2'] else "")
+            st.divider()
+            if not risk['valid_rr']:
+                rr1_txt = f"{risk['rr1']:.2f}" if risk['rr1'] else "0"
+                st.warning(f"RR {rr1_txt} bajo (<1.2). Aunque el score sea bueno, el trade no compensa riesgo. Busca entrada más cercana a invalidación.")
+            else:
+                st.success(f"RR válido {risk['rr1']:.2f} | Riesgo {risk['risk_pct']:.1f}% del precio al stop")
+
+        with tab4:
+            st.subheader("Multi-Timeframe Alignment")
+            st.json(mtf)
+            mtf_df = pd.DataFrame([{"TF": k, "Trend": v['trend'], "Score": v['score'], "SMA20": v.get('sma20', '-'), "SMA200": v.get('sma200', '-'), "Fuente": mtf.get('fuente_datos', {}).get(k, '-')} for k, v in mtf['timeframes'].items()])
+            st.dataframe(mtf_df, use_container_width=True)
+            if mtf['alignment'] == "BULL_ALIGNED":
+                st.success("Todos los timeframes alineados alcistas - alta probabilidad si score diario también es BUY")
+            elif mtf['alignment'] == "BEAR_ALIGNED":
+                st.error("Todos alineados bajistas")
+            elif mtf['alignment'] == "MIXED":
+                st.warning("Timeframes mixtos - espera alineación o baja a timeframe menor para entrada")
+
+        with tab5:
+            st.subheader("Elliott Detalle v4")
+            st.json({
+                "state": aw['state'],
+                "confidence": f"{aw['confidence']:.1%}",
+                "gap": aw.get('gap'),
+                "is_bullish": aw.get('is_bullish'),
+                "reason": aw['reason'],
+                "next_target": aw.get('next_target'),
+                "is_stale": aw.get('is_stale', False)
+            })
+            if aw.get('alternatives'):
+                st.markdown("**Conteos alternativos:**")
+                for alt in aw['alternatives']:
+                    st.warning(f"{alt['state']} - Conf {alt['confidence']:.0%}: {alt['reason']}")
+
+        with tab6:
+            render_history_tab()
+
+        return result
+
+
+def render_history_tab():
+    st.subheader("Historial de análisis")
+    recs = analysis_history.recent_analyses(limit=50)
+    if not recs:
+        st.caption("Aún no hay análisis guardados. Cada análisis exitoso se guarda aquí automáticamente.")
+        return
+    hist_df = pd.DataFrame([{
+        "Ticker": r["ticker"], "Fecha": r["timestamp"], "Score": r["score"],
+        "Veredicto": r["veredicto"], "Precio": f"${r['precio']:.2f}",
+        "RR": f"{r['rr']:.2f}" if r["rr"] else "-",
+        "Dirección": r["direccion"], "Onda": r["estado_onda"],
+        "id": r["id"],
+    } for r in recs])
+    st.dataframe(hist_df.drop(columns=["id"]), use_container_width=True, hide_index=True)
+    opciones = {f'{r["ticker"]} | {r["timestamp"]} | Score {r["score"]:.0f} | {r["veredicto"]}': r["id"]
+                for r in recs}
+    sel = st.selectbox("Cargar un análisis previo", list(opciones.keys()))
+    if st.button("Cargar y analizar", type="primary"):
+        st.session_state.hist_load = opciones[sel]
+        st.session_state.auto_analyze = True
+        st.rerun()
 
 
 # ---------------- Conexión ----------------
@@ -90,6 +286,16 @@ with st.sidebar:
 
 ibkr: IBKRConnector = st.session_state.get("ibkr")
 
+# Header principal con badge de estado de conexión
+st.markdown(
+    '<div style="display:flex; align-items:center; gap:12px; margin-bottom:4px;">'
+    '<h1 style="margin:0; font-size:1.7rem; letter-spacing:-0.02em;">Trading Consultant</h1>'
+    f'{ui_theme.conn_badge_html(ibkr is not None and ibkr.connected, "Conectado" if ibkr and ibkr.connected else "No conectado")}'
+    "</div>",
+    unsafe_allow_html=True,
+)
+st.caption("Análisis multi-motor + operativa manual · IBKR")
+
 # ---------------- Cuenta real ----------------
 if ibkr and ibkr.connected:
     col1, col2 = st.columns([1, 2])
@@ -115,202 +321,36 @@ if ibkr and ibkr.connected:
 st.divider()
 
 # ---------------- Análisis con datos de IBKR ----------------
-if analizar_btn:
+hist_load = st.session_state.pop("hist_load", None)
+if hist_load is not None:
+    rec = analysis_history.load_analysis(int(hist_load))
+    if rec:
+        ticker, period, bar_size, deviation = rec["ticker"], rec["period"], rec["bar_size"], rec["deviation"]
+
+auto = st.session_state.pop("auto_analyze", False)
+if analizar_btn or auto:
     if not ibkr or not ibkr.connected:
         st.error("Conéctate a IBKR primero (panel izquierdo).")
     else:
-        with st.spinner(f"Trayendo histórico de {ticker} desde IBKR y analizando en 8 motores..."):
-            try:
-                raw_df = ibkr.get_historical_bars(ticker, duration=period, bar_size=bar_size)
-                if raw_df is None or len(raw_df) < 30:
-                    st.error("IBKR no devolvió suficientes datos. Revisa el ticker o el permiso de mercado de datos delayed.")
-                else:
-                    # Todo el pipeline (Elliott + Regime + Momentum + SMC +
-                    # Volume Profile + MTF + Scoring + Risk) vive ahora en
-                    # pipeline.run_full_analysis -- una sola fuente de verdad
-                    # en vez de estar copiado aquí.
-                    result = run_full_analysis(raw_df, ticker, deviation, ibkr=ibkr)
-                    df = result["df"]
-                    summary = result["summary"]
-                    aw = result["active_wave"]
-                    regime = result["regime"]
-                    momentum = result["momentum"]
-                    smc = result["smc"]
-                    vol_prof = result["vol_prof"]
-                    mtf = result["mtf"]
-                    risk = result["risk"]
-                    scoring = result["scoring"]
-                    st.session_state.last_summary = summary
-
-                    # 3. Veredicto principal
-                    st.divider()
-                    col_score, col_ver, col_conf = st.columns([1, 2, 1])
-                    with col_score:
-                        st.metric("SCORE CONFLUENCIA", f"{scoring['score']}/100", delta=f"{scoring['confidence_label']}")
-                    with col_ver:
-                        if scoring['action'] == "BUY":
-                            st.success(f"### VEREDICTO: {scoring['veredicto']}")
-                        elif scoring['action'] == "SELL":
-                            st.error(f"### VEREDICTO: {scoring['veredicto']}")
-                        else:
-                            st.warning(f"### ⏸ VEREDICTO: {scoring['veredicto']}")
-                        st.caption(f"Dirección Elliott: {'Alcista' if aw.get('is_bullish') else 'Bajista' if aw.get('is_bullish')==False else 'Neutral'} | Estado: {aw['state']} | Gap: {aw.get('gap',0)} velas")
-                    with col_conf:
-                        st.metric("Precio Actual (IBKR, delayed)", f"${summary['precio_actual']}", f"{risk['risk_pct']:.1f}% riesgo" if risk['risk_pct'] else "")
-                        st.metric("RR", f"{risk['rr1']:.2f}" if risk['rr1'] else "-", "Válido" if risk['valid_rr'] else "Bajo")
-
-                    if aw.get('is_stale'):
-                        st.error(f"STALE: Impulso terminó hace {aw.get('gap')} velas. No operar, esperar nuevo 1-2.")
-                    if not regime['tradeable']:
-                        st.error(f"REGIMEN BLOQUEA: {regime['reason']}")
-
-                    # 4. Gráfico Pro v4
-                    fig_v4 = ChartEngineV4.plot(df, ticker, summary['elliott_historico'], summary['fib_levels'], summary.get('fib_extensions', {}), aw, smc, vol_prof, risk, show_ob, show_fvg, show_vp)
-                    st.plotly_chart(fig_v4, use_container_width=True)
-                    st.caption(f"Razonamiento: {aw['reason']}")
-
-                    # 5. Soportes (posible zona de compra) / Resistencias (objetivo o venta)
-                    st.subheader("📐 Niveles clave: soportes y resistencias (Fibonacci sobre tramo activo)")
-                    niveles = []
-                    for k, v in summary['fib_levels'].items():
-                        niveles.append({"tipo": "Retroceso", "nivel": f"{k*100:.1f}%", "precio": v})
-                    for k, v in summary.get('fib_extensions', {}).items():
-                        niveles.append({"tipo": "Extensión", "nivel": f"{k*100:.0f}%", "precio": v})
-
-                    if niveles:
-                        precio_actual = summary['precio_actual']
-                        # La etiqueta de cada nivel depende de si está a favor o en
-                        # contra de la dirección que ya detectó Elliott (aw['is_bullish']).
-                        # Antes se etiquetaba SOLO por estar por encima/debajo del precio,
-                        # así que en un conteo bajista (ej. CELH en FORMING_WAVE_4) un
-                        # nivel inferior salía como "SOPORTE (posible compra)" aunque el
-                        # veredicto de arriba fuera SELL -- contradicción pura de UI, la
-                        # onda/score ya estaban bien.
-                        is_bull_dir = aw.get('is_bullish')
-                        filas = []
-                        for n in niveles:
-                            dist_pct = (n["precio"] - precio_actual) / precio_actual * 100
-                            below = n["precio"] < precio_actual
-                            above = n["precio"] > precio_actual
-                            if is_bull_dir is None:
-                                zona = "🟢 Nivel inferior" if below else ("🔴 Nivel superior" if above else "⚪ En precio actual")
-                            elif below:
-                                zona = "🟢 SOPORTE (a favor de la tendencia alcista)" if is_bull_dir \
-                                    else "🟡 Nivel inferior (en contra de tendencia bajista, no es señal de compra)"
-                            elif above:
-                                zona = "🔴 RESISTENCIA (objetivo bajista / posible corto)" if not is_bull_dir \
-                                    else "🟡 Nivel superior (en contra de tendencia alcista, no es señal de venta)"
-                            else:
-                                zona = "⚪ En precio actual"
-                            filas.append({
-                                "Zona": zona,
-                                "Tipo Fib": n["tipo"],
-                                "Nivel": n["nivel"],
-                                "Precio": f"${n['precio']:.2f}",
-                                "Distancia": f"{dist_pct:+.2f}%",
-                                "_dist_abs": abs(dist_pct),
-                            })
-                        filas.sort(key=lambda r: r["_dist_abs"])
-                        for f in filas:
-                            del f["_dist_abs"]
-                        niveles_df = pd.DataFrame(filas)
-                        st.dataframe(niveles_df, use_container_width=True, hide_index=True)
-                        st.caption("Los niveles se etiquetan según la dirección que ya detectó Elliott (arriba), no solo por estar por encima o debajo del precio: un nivel 'a favor' es soporte/resistencia operable, uno 'en contra' es solo estructura a vigilar.")
-                    else:
-                        st.info(f"Sin niveles Fibonacci calculados para el tramo activo actual (estado: {aw['state']}).")
-
-                    # 6. Tabs de análisis
-                    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Desglose Score", "Confluencia", "Riesgo", "MTF", "Elliott Detalle"])
-
-                    with tab1:
-                        st.subheader("Por qué este score")
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.json(scoring['breakdown'])
-                            for r in scoring['reasons']:
-                                if "+-" in r or "+" in r or "-" in r:
-                                    if "-" in r and "+" not in r.split("-")[-1]:
-                                        st.write(f"🔻 {r}")
-                                    else:
-                                        st.write(f"✅ {r}")
-                                else:
-                                    st.write(f"• {r}")
-                        with c2:
-                            st.markdown(f"**Regime:** {regime['regime']} ADX {regime['adx']:.1f} Chop {regime['choppiness']:.1f}")
-                            st.markdown(f"**Momentum:** RSI {momentum['rsi']:.1f} | {momentum['mom_state']} | Div: {momentum['divergence']}")
-                            st.markdown(f"**SMC Trend:** {smc['trend_smc']} | BOS: {len(smc['bos_choch']['bos'])} CHOCH: {len(smc['bos_choch']['choch'])}")
-                            st.markdown(f"**Vol Profile:** POC ${vol_prof.get('poc','-')} | Dist {vol_prof.get('dist_poc_pct',0):.1f}%")
-                            st.markdown(f"**MTF:** {mtf['alignment']} | {mtf['reason']}")
-
-                    with tab2:
-                        colA, colB, colC = st.columns(3)
-                        with colA:
-                            st.subheader("Regime Filter")
-                            st.json(regime)
-                            st.subheader("Momentum & Divergence")
-                            st.json({k: v for k, v in momentum.items() if k not in ['rsi_series', 'macd_hist_series']})
-                        with colB:
-                            st.subheader("SMC - Smart Money")
-                            st.write(f"**BOS/CHOCH:** {smc['bos_choch']['reason']}")
-                            st.json(smc['bos_choch'])
-                            st.write(f"**Liquidity Sweep:** {smc['liquidity_sweep']['reason']}")
-                            st.json(smc['liquidity_sweep'])
-                        with colC:
-                            st.subheader("Volume Profile")
-                            st.json({k: v for k, v in vol_prof.items() if k != 'histogram'})
-                            st.subheader("Order Blocks & FVGs")
-                            st.write("OBs activos:", smc['order_blocks'])
-                            st.write("FVGs activos:", smc['fvg'])
-
-                    with tab3:
-                        st.subheader("Plan de trade (no es ejecución, es análisis)")
-                        c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Entry", f"${risk['entry']:.2f}")
-                        c2.metric("Stop Loss", f"${risk['stop']:.2f}" if risk['stop'] else "-", risk['stop_reason'])
-                        if risk['tps']:
-                            c3.metric("TP1", f"${risk['tps'][0]['price']:.2f}", f"RR {risk['rr1']:.2f}" if risk['rr1'] else "")
-                            if len(risk['tps']) > 1:
-                                c4.metric("TP2", f"${risk['tps'][1]['price']:.2f}", f"RR {risk['rr2']:.2f}" if risk['rr2'] else "")
-                        st.divider()
-                        if not risk['valid_rr']:
-                            # Bug fijo: antes el condicional iba dentro del format spec
-                            # (f"{risk['rr1']:.2f if risk['rr1'] else 0}"), lo cual es un
-                            # format spec inválido y lanzaba ValueError en esta rama.
-                            rr1_txt = f"{risk['rr1']:.2f}" if risk['rr1'] else "0"
-                            st.warning(f"RR {rr1_txt} bajo (<1.2). Aunque el score sea bueno, el trade no compensa riesgo. Busca entrada más cercana a invalidación.")
-                        else:
-                            st.success(f"RR válido {risk['rr1']:.2f} | Riesgo {risk['risk_pct']:.1f}% del precio al stop")
-
-                    with tab4:
-                        st.subheader("Multi-Timeframe Alignment")
-                        st.json(mtf)
-                        mtf_df = pd.DataFrame([{"TF": k, "Trend": v['trend'], "Score": v['score'], "SMA20": v.get('sma20', '-'), "SMA200": v.get('sma200', '-'), "Fuente": mtf.get('fuente_datos', {}).get(k, '-')} for k, v in mtf['timeframes'].items()])
-                        st.dataframe(mtf_df, use_container_width=True)
-                        if mtf['alignment'] == "BULL_ALIGNED":
-                            st.success("Todos los timeframes alineados alcistas - alta probabilidad si score diario también es BUY")
-                        elif mtf['alignment'] == "BEAR_ALIGNED":
-                            st.error("Todos alineados bajistas")
-                        elif mtf['alignment'] == "MIXED":
-                            st.warning("Timeframes mixtos - espera alineación o baja a timeframe menor para entrada")
-
-                    with tab5:
-                        st.subheader("Elliott Detalle v4")
-                        st.json({
-                            "state": aw['state'],
-                            "confidence": f"{aw['confidence']:.1%}",
-                            "gap": aw.get('gap'),
-                            "is_bullish": aw.get('is_bullish'),
-                            "reason": aw['reason'],
-                            "next_target": aw.get('next_target'),
-                            "is_stale": aw.get('is_stale', False)
-                        })
-                        if aw.get('alternatives'):
-                            st.markdown("**Conteos alternativos:**")
-                            for alt in aw['alternatives']:
-                                st.warning(f"{alt['state']} - Conf {alt['confidence']:.0%}: {alt['reason']}")
-            except Exception as e:
-                st.error(f"Error trayendo/analizando datos: {e}")
-                st.exception(e)
+        try:
+            result = render_analysis(ticker, period, bar_size, deviation, ibkr,
+                                     show_ob, show_fvg, show_vp)
+            if result:
+                analysis_history.record_analysis(
+                    ticker=result["summary"].get("ticker", ticker),
+                    score=result["scoring"]["score"],
+                    veredicto=result["scoring"]["veredicto"],
+                    action=result["scoring"]["action"],
+                    precio=result["summary"]["precio_actual"],
+                    rr=result["risk"].get("rr1"),
+                    direccion="bull" if result["active_wave"].get("is_bullish") is True
+                              else ("bear" if result["active_wave"].get("is_bullish") is False else "neutral"),
+                    estado_onda=result["active_wave"].get("state", "—"),
+                    deviation=deviation, period=period, bar_size=bar_size,
+                )
+        except Exception as e:
+            st.error(f"Error trayendo/analizando datos: {e}")
+            st.exception(e)
 
 st.divider()
 
@@ -351,3 +391,4 @@ else:
                 st.success(f"Orden enviada. Estado: {result['status']} | ID: {result['order_id']}")
             except Exception as e:
                 st.error(f"Error enviando orden: {e}")
+
