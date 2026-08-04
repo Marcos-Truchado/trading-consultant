@@ -244,11 +244,11 @@ with st.sidebar:
     st.header("Conexión IBKR")
     host = st.text_input("Host", value="127.0.0.1")
     # localhost, mas tarde lo haré como un sistema distribuido para conectar varias cuentas ajenas
-    port = st.number_input("Puerto", value=7497, step=1,
+    port = st.number_input("Puerto", value=4001, step=1,
                             help="TWS: 7497 Paper / 7496 Real  |  IB Gateway: 4002 Paper / 4001 Real")
     st.caption(f"Detectado: **{port_label(port)}**")
     if is_live_port(port):
-        st.warning("⚠️ Este puerto es de CUENTA REAL, no paper trading.")
+        st.warning("Este puerto es de CUENTA REAL, no paper trading.")
     client_id = st.number_input("Client ID", value=1, step=1)
 
     if "ibkr" not in st.session_state:
@@ -375,7 +375,7 @@ else:
         if o_type == "Limit":
             o_limit_price = st.number_input("Precio límite", min_value=0.01, value=1.0, step=0.01)
 
-        modo_cuenta = "⚠️ CUENTA REAL" if is_live_port(port) else "PAPER"
+        modo_cuenta = "CUENTA REAL" if is_live_port(port) else "PAPER"
         confirmo = st.checkbox(
             f"Confirmo que quiero enviar esta orden AHORA a {modo_cuenta} "
             f"({port_label(port)}, {host}:{port})"
